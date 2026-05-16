@@ -1,0 +1,104 @@
+// payment.compact — ChainEngineers × Midnight Hackathon
+//
+// Confidential payment terminal contract for small merchants in Nigeria.
+//
+// Public ledger (visible on-chain):
+//   - payment_ref   : unique payment ID from the terminal
+//   - commitment    : hash(amount + merchant_id + salt)
+//   - status        : PENDING | CONFIRMED | EXPIRED
+//   - timestamp     : block height at submission
+//
+// Private (never leaves the prover):
+//   - amount        : DUST amount charged
+//   - merchant_id   : terminal/merchant identifier
+//   - salt          : random blinding factor
+
+pragma language_version >= 0.14.0;
+
+import CompactStandardLibrary;
+
+enum PaymentStatus {
+    PENDING,
+    CONFIRMED,
+    EXPIRED
+}
+
+struct PaymentRecord {
+    commitment  : Bytes<32>;
+    status      : PaymentStatus;
+    timestamp   : Uint<64>;
+}
+
+ledger {
+    payments        : Map<Bytes<32>, PaymentRecord>;
+    total_submitted : Uint<64>;
+    total_confirmed : Uint<64>;
+}
+
+circuit submit_payment(
+    payment_ref : Bytes<32>,
+    witness amount      : Uint<64>,
+    witness merchant_id : Bytes<32>,
+    witness salt        : Bytes<32>
+): [] {
+    const amount_bytes : Bytes<8> = pad(8, amount as Bytes<8>);
+
+    const commitment : Bytes<32> = persistent_hash<Bytes<72>>(
+        amount_bytes ++ merchant_id ++ salt
+    );
+
+    assert !payments.member(payment_ref)
+        : "payment_ref already exists";
+
+    payments.insert(payment_ref, PaymentRecord {
+        commitment : commitment,
+        status     : PaymentStatus.PENDING,
+        timestamp  : own_block_height()
+    });
+
+    total_submitted = total_submitted + 1;
+}
+
+circuit confirm_payment(
+    payment_ref : Bytes<32>,
+    witness amount      : Uint<64>,
+    witness merchant_id : Bytes<32>,
+    witness salt        : Bytes<32>
+): [] {
+    const amount_bytes : Bytes<8> = pad(8, amount as Bytes<8>);
+
+    const expected_commitment : Bytes<32> = persistent_hash<Bytes<72>>(
+        amount_bytes ++ merchant_id ++ salt
+    );
+
+    const record : PaymentRecord = payments.lookup(payment_ref);
+
+    assert record.commitment == expected_commitment
+        : "commitment mismatch: wrong amount or merchant";
+
+    assert record.status == PaymentStatus.PENDING
+        : "payment is not PENDING";
+
+    payments.insert(payment_ref, PaymentRecord {
+        commitment : record.commitment,
+        status     : PaymentStatus.CONFIRMED,
+        timestamp  : record.timestamp
+    });
+
+    total_confirmed = total_confirmed + 1;
+}
+
+circuit expire_payment(
+    payment_ref : Bytes<32>
+): [] {
+    const record : PaymentRecord = payments.lookup(payment_ref);
+
+    assert record.status == PaymentStatus.PENDING
+        : "only PENDING payments can be expired";
+
+    payments.insert(payment_ref, PaymentRecord {
+        commitment : record.commitment,
+        status     : PaymentStatus.EXPIRED,
+        timestamp  : record.timestamp
+    });
+}
